@@ -350,7 +350,7 @@ class LoginDialog(QDialog):
             dialog.finish_submit(False, outcome.message)
             # N10: 明确业务失败时关闭协议窗口并弹窗提示失败，避免按钮仍显示“不同意，返回注册”
             dialog.reject()
-            QMessageBox.critical(self, "注册失败", outcome.message or "注册信息无效，请检查后重试")
+            QMessageBox.critical(self, "注册失败", outcome.message)
             return
         dialog.finish_submit(False, outcome.message)
 

@@ -409,7 +409,7 @@ def test_rate_limit_keeps_pending_record_for_retry(dialog):
     # 服务端 429 不保证带特定业务 code，按 HTTP 状态码 429 区分
     dialog.widget._on_register_finished(
         sign.submit_token,
-        RegisterOutcome(False, "Too Many Requests", status_code=429),
+        RegisterOutcome(False, "请求过于频繁，请稍后重试", status_code=429),
     )
 
     assert registration_resume.load_pending()["registration_request_id"] == request_id
