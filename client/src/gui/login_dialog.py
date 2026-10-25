@@ -57,6 +57,8 @@ class LoginDialog(QDialog):
         self._sign_dialog: AgreementSignDialog | None = None
         self._submit_context: dict | None = None
         self._active_register_token: str | None = None
+        # 本次注册是否在确认上一次未完成的请求（恢复流程，需要原凭据）。
+        self._resuming_registration = False
 
         self.setWindowTitle("ChatWithLuoTianyi - 登录/注册")
         self.setFixedSize(420, 380)
@@ -246,6 +248,15 @@ class LoginDialog(QDialog):
         resume_version = ""
         if pending and pending.get("username") == username and pending.get("registration_request_id") == request_id:
             resume_version = pending.get("agreement_version", "")
+        # N12：恢复是在确认上一次未成功的提交，必须让用户知道要用原账号信息，而不是新建注册。
+        self._resuming_registration = bool(resume_version)
+        if self._resuming_registration:
+            QMessageBox.information(
+                self,
+                "继续上次注册",
+                "检测到上次未完成的注册，将使用原账号信息确认结果。\n"
+                "请使用注册时设置的原用户名和原密码；成功后登录的也是该账号。",
+            )
         self._submit_context = {
             "username": username,
             "password": password,
@@ -268,7 +279,11 @@ class LoginDialog(QDialog):
             # 不同意只回注册表单：输入保留，不创建账号、不消耗邀请码、不退出客户端。
             return
         registration_resume.clear_pending()
-        QMessageBox.information(self, "成功", "注册成功，请登录")
+        if self._resuming_registration:
+            # N12：恢复成功对应的是原账号，不是这次输入的新内容。
+            QMessageBox.information(self, "成功", "已确认上次注册成功，请使用原账号登录")
+        else:
+            QMessageBox.information(self, "成功", "注册成功，请登录")
         self.l_username.setText(username)
         self.tabs.setCurrentIndex(0)
 
@@ -309,6 +324,8 @@ class LoginDialog(QDialog):
             return
         context["resume_agreement_version"] = ""
         context["request_id"] = registration_resume.new_request_id()
+        # 换版后开始的是新请求，不再是"确认上次提交"。
+        self._resuming_registration = False
         registration_resume.clear_pending()
 
     def _register_with_agreement(self, context: dict, agreement_version: str) -> RegisterOutcome:
@@ -350,7 +367,11 @@ class LoginDialog(QDialog):
             dialog.finish_submit(False, outcome.message)
             # N10: 明确业务失败时关闭协议窗口并弹窗提示失败，避免按钮仍显示“不同意，返回注册”
             dialog.reject()
-            QMessageBox.critical(self, "注册失败", outcome.message)
+            message = outcome.message
+            if outcome.code == "REGISTRATION_REQUEST_UNVERIFIABLE":
+                # N12：无法核验原操作时，明确告诉用户要用原注册密码确认。
+                message = f"{message}\n如需确认原注册，请使用注册时设置的原密码重试。"
+            QMessageBox.critical(self, "注册失败", message)
             return
         dialog.finish_submit(False, outcome.message)
 

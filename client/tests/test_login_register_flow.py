@@ -414,3 +414,50 @@ def test_rate_limit_keeps_pending_record_for_retry(dialog):
 
     assert registration_resume.load_pending()["registration_request_id"] == request_id
     assert registration_resume.request_id_for("taken") == request_id
+
+
+def test_resume_flow_explains_original_credentials_and_account(dialog):
+    """N12：恢复上一次未完成注册时说明要用原账号信息，成功后指明是原账号。"""
+    registration_resume.save_pending("req-old", "newbie", "terms-2026-10-v1")
+    dialog.widget.fill_register_form()
+
+    dialog.widget.do_register()
+
+    # 打开协议窗口前先说明这是在确认原提交
+    assert any("上次未完成的注册" in str(item) for item in dialog.messages.infos)
+    assert any("原用户名和原密码" in str(item) for item in dialog.messages.infos)
+    # 成功提示指明对应的是原账号
+    assert any("已确认上次注册成功" in str(item) for item in dialog.messages.infos)
+
+
+def test_non_resume_success_keeps_original_message(dialog):
+    """没有未决记录时仍是普通注册成功文案，不误报"已确认上次注册"。"""
+    dialog.widget.fill_register_form()
+
+    dialog.widget.do_register()
+
+    assert any("注册成功，请登录" in str(item) for item in dialog.messages.infos)
+    assert not any("已确认上次注册成功" in str(item) for item in dialog.messages.infos)
+
+
+def test_unverifiable_recovery_tells_user_to_use_original_password(dialog):
+    """N12：原操作无法核验时，提示使用注册时的原密码。"""
+    dialog.widget.fill_register_form(username="taken")
+    dialog.widget.do_register()
+    sign = FakeSignDialog.last_instance
+    dialog.widget._sign_dialog = sign
+    dialog.widget._active_register_token = sign.submit_token
+
+    dialog.widget._on_register_finished(
+        sign.submit_token,
+        RegisterOutcome(
+            False,
+            "原注册结果无法核验，请用账号密码登录确认；不会创建替代账号",
+            code="REGISTRATION_REQUEST_UNVERIFIABLE",
+            status_code=409,
+        ),
+    )
+
+    assert dialog.messages.errors
+    message = str(dialog.messages.errors[-1])
+    assert "原密码" in message
