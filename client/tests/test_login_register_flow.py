@@ -353,8 +353,16 @@ def test_changing_username_before_confirming_previous_request_is_blocked(dialog)
     assert registration_resume.load_pending()["registration_request_id"] == "req-old"
 
 
-def test_definitive_business_failure_allows_new_username(dialog, app):
-    """服务端明确 4xx 拒绝后，用户可以改用户名继续注册（审查 N17）。
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [
+        (400, "注册失败，请检查邀请码或用户名"),
+        (403, "需要先签署用户协议"),
+        (422, "同意字段无效"),
+    ],
+)
+def test_definitive_business_failure_allows_new_username(dialog, app, status_code, message):
+    """spec 明确失败状态清除 pending，用户可修正资料继续注册（N17/N24）。
 
     走真实提交链路：_start_registration_submit → _RegisterTask → 线程池 → 信号 → 结果处理。
     """
@@ -365,7 +373,7 @@ def test_definitive_business_failure_allows_new_username(dialog, app):
     sign = FakeSignDialog.last_instance
     dialog.widget._sign_dialog = sign
     old_request_id = dialog.widget._submit_context["request_id"]
-    dialog.binder.outcome = RegisterOutcome(False, "注册失败，请检查邀请码或用户名", status_code=400)
+    dialog.binder.outcome = RegisterOutcome(False, message, status_code=status_code)
 
     dialog.widget._start_registration_submit("terms-2026-10-v1")
     QThreadPool.globalInstance().waitForDone(5000)
@@ -374,8 +382,8 @@ def test_definitive_business_failure_allows_new_username(dialog, app):
 
     assert dialog.binder.calls[-1]["registration_request_id"] == old_request_id
     assert registration_resume.load_pending() is None  # 明确失败：结束未决状态
-    assert dialog.messages.errors  # N10: 明确失败提示
-    assert "注册失败" in dialog.messages.errors[-1][1]
+    assert dialog.messages.errors
+    assert dialog.messages.errors[-1][1] == message
 
     FakeSignDialog.last_instance = None
     dialog.widget.fill_register_form(username="available")
@@ -582,13 +590,21 @@ def test_unverifiable_closes_real_modal_and_preserves_pending(app, monkeypatch, 
             sign.submit_requested.emit(sign.version)
 
         def watchdog():
-            if sign.isVisible():
-                watchdog_fired.append(True)
-                sign.finish_submit(False, "测试 watchdog：提交信号未完成")
-                sign.reject()
+            watchdog_fired.append(True)
+            sign.finish_submit(False, "测试 watchdog：提交信号未完成")
+            sign.reject()
 
-        QTimer.singleShot(0, click_confirm_after_open)
-        QTimer.singleShot(5000, watchdog)
+        # Timer 以 dialog 为 parent，并在 modal 结束时停止，防止测试结束后访问已销毁的 PySide wrapper。
+        start_timer = QTimer(sign)
+        start_timer.setSingleShot(True)
+        start_timer.timeout.connect(click_confirm_after_open)
+        watchdog_timer = QTimer(sign)
+        watchdog_timer.setSingleShot(True)
+        watchdog_timer.timeout.connect(watchdog)
+        sign.finished.connect(start_timer.stop)
+        sign.finished.connect(watchdog_timer.stop)
+        start_timer.start(0)
+        watchdog_timer.start(5000)
         return sign
 
     monkeypatch.setattr(login_module, "AgreementSignDialog", real_dialog)
