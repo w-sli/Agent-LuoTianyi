@@ -10,6 +10,7 @@ from PySide6.QtCore import Signal  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from src.gui import login_dialog as login_module  # noqa: E402
+from src.gui.agreement_sign_dialog import AgreementSignDialog  # noqa: E402
 from src.gui.login_dialog import LoginDialog  # noqa: E402
 from src.network.auth import RegisterOutcome  # noqa: E402
 from src.utils import registration_resume  # noqa: E402
@@ -53,9 +54,11 @@ class FakeSignDialog(QDialog):
 
 
 class FakeBinder:
-    def __init__(self, outcome=None, agreement=(True, "", AGREEMENT)):
+    def __init__(self, outcome=None, agreement=(True, "", AGREEMENT), login_result=(False, "登录失败")):
         self.outcome = outcome
         self.agreement = agreement
+        self.login_result = login_result
+        self.login_calls: list[tuple] = []
         self.calls: list[dict] = []
 
     def on_fetch_agreement(self):
@@ -64,6 +67,10 @@ class FakeBinder:
     def on_register_with_agreement(self, **kwargs):
         self.calls.append(kwargs)
         return self.outcome
+
+    def on_login(self, username, password, do_auto_login=False):
+        self.login_calls.append((username, password, do_auto_login))
+        return self.login_result
 
 
 @pytest.fixture(scope="module")
@@ -423,11 +430,66 @@ def test_resume_flow_explains_original_credentials_and_account(dialog):
 
     dialog.widget.do_register()
 
-    # 打开协议窗口前先说明这是在确认原提交
     assert any("上次未完成的注册" in str(item) for item in dialog.messages.infos)
     assert any("原用户名和原密码" in str(item) for item in dialog.messages.infos)
-    # 成功提示指明对应的是原账号
     assert any("已确认上次注册成功" in str(item) for item in dialog.messages.infos)
+
+
+def test_password_decryption_failure_keeps_pending_for_key_refresh(dialog):
+    """服务端仍可用 400 表示密码解密失败；此时保留 pending 以便客户端换钥重试。"""
+    FakeSignDialog.next_result = QDialog.DialogCode.Rejected
+    dialog.widget.fill_register_form(username="taken")
+    dialog.widget.do_register()
+    sign = FakeSignDialog.last_instance
+    dialog.widget._sign_dialog = sign
+    dialog.widget._active_register_token = sign.submit_token
+    request_id = dialog.widget._submit_context["request_id"]
+    registration_resume.save_pending(request_id, "taken", "terms-2026-10-v1")
+
+    dialog.widget._on_register_finished(
+        sign.submit_token,
+        RegisterOutcome(False, "Encryption error", code="PASSWORD_DECRYPT_FAILED", status_code=400),
+    )
+
+    assert registration_resume.load_pending()["registration_request_id"] == request_id
+    assert registration_resume.request_id_for("taken") == request_id
+    assert FakeSignDialog.last_instance.submissions == [(False, "Encryption error")]
+
+
+@pytest.mark.parametrize("status_code", [500, 503])
+def test_server_failure_retry_reuses_pending_request_id(dialog, app, status_code):
+    """AC-06：5xx 后保留 pending，下一次实际提交必须复用相同 request ID。"""
+    from PySide6.QtCore import QThreadPool
+
+    FakeSignDialog.next_result = QDialog.DialogCode.Rejected
+    dialog.widget.fill_register_form(username="taken")
+    dialog.widget.do_register()
+    first_sign = FakeSignDialog.last_instance
+    first_request_id = dialog.widget._submit_context["request_id"]
+    registration_resume.save_pending(first_request_id, "taken", "terms-2026-10-v1")
+
+    dialog.binder.outcome = RegisterOutcome(False, "服务暂不可用，请稍后重试", status_code=status_code)
+    dialog.widget._sign_dialog = first_sign
+    dialog.widget._start_registration_submit("terms-2026-10-v1")
+    QThreadPool.globalInstance().waitForDone(5000)
+    app.processEvents()
+
+    assert dialog.binder.calls[-1]["registration_request_id"] == first_request_id
+    assert registration_resume.load_pending()["registration_request_id"] == first_request_id
+
+    # 再次进入流程并真正发起下一次提交；payload 仍必须带旧 ID。
+    dialog.widget.fill_register_form(username="taken")
+    dialog.widget.do_register()
+    assert dialog.widget._submit_context["request_id"] == first_request_id
+    second_sign = FakeSignDialog.last_instance
+    dialog.widget._sign_dialog = second_sign
+    dialog.binder.outcome = RegisterOutcome(True, "注册成功")
+    dialog.widget._start_registration_submit("terms-2026-10-v1")
+    QThreadPool.globalInstance().waitForDone(5000)
+    app.processEvents()
+
+    assert dialog.binder.calls[-1]["registration_request_id"] == first_request_id
+    assert len(dialog.binder.calls) == 2
 
 
 def test_non_resume_success_keeps_original_message(dialog):
@@ -440,24 +502,147 @@ def test_non_resume_success_keeps_original_message(dialog):
     assert not any("已确认上次注册成功" in str(item) for item in dialog.messages.infos)
 
 
-def test_unverifiable_recovery_tells_user_to_use_original_password(dialog):
-    """N12：原操作无法核验时，提示使用注册时的原密码。"""
+def test_unverifiable_recovery_preserves_pending_until_login_confirms(dialog):
+    """N20: UNVERIFIABLE 按 spec 提示登录确认，并保留原 ID，登录成功后才清理。"""
+    request_id = "req-unverifiable"
+    registration_resume.save_pending(request_id, "taken", "terms-2026-10-v1")
+    FakeSignDialog.next_result = QDialog.DialogCode.Rejected
     dialog.widget.fill_register_form(username="taken")
     dialog.widget.do_register()
+
     sign = FakeSignDialog.last_instance
     dialog.widget._sign_dialog = sign
     dialog.widget._active_register_token = sign.submit_token
-
     dialog.widget._on_register_finished(
         sign.submit_token,
         RegisterOutcome(
             False,
-            "原注册结果无法核验，请用账号密码登录确认；不会创建替代账号",
+            "原注册结果无法核验，请重新登录确认；不会创建替代账号",
             code="REGISTRATION_REQUEST_UNVERIFIABLE",
             status_code=409,
         ),
     )
 
+    # 错误结果不能丢掉唯一恢复凭据；UI 路由与 spec:297 一致，是登录确认而非新注册。
+    assert registration_resume.load_pending()["registration_request_id"] == request_id
+    assert registration_resume.request_id_for("taken") == request_id
+    assert dialog.widget.tabs.currentIndex() == 0
+    assert dialog.widget.l_username.text() == "taken"
+    assert dialog.messages.infos
+    assert "请使用原账号登录确认" in dialog.messages.infos[-1][1]
+    assert "未决请求已保留" in dialog.messages.infos[-1][1]
+    assert not dialog.messages.errors
+
+    # 如用户返回注册流程并补上原凭据，仍沿用原 request ID，而不是创建新请求。
+    FakeSignDialog.next_result = QDialog.DialogCode.Rejected
+    dialog.widget.r_password.setText("original-password")
+    dialog.widget.r_confirm_password.setText("original-password")
+    dialog.widget.tabs.setCurrentIndex(1)
+    dialog.widget.do_register()
+    assert dialog.widget._submit_context["request_id"] == request_id
+    assert registration_resume.load_pending()["registration_request_id"] == request_id
+
+    # 登录失败不清记录；同名登录成功后才确认并清除该 pending。
+    dialog.widget.l_password.setText("wrong")
+    dialog.binder.login_result = (False, "登录失败")
+    dialog.widget.do_login()
+    assert registration_resume.load_pending()["registration_request_id"] == request_id
+
+    dialog.widget.l_password.setText("valid-current-password")
+    dialog.binder.login_result = (True, "登录成功")
+    dialog.widget.do_login()
+    assert registration_resume.load_pending() is None
+
+
+def test_unverifiable_closes_real_modal_and_preserves_pending(app, monkeypatch, tmp_path, messages):
+    """使用真实 AgreementSignDialog 验证 UNVERIFIABLE 会退出 modal 并保留恢复 ID。"""
+    monkeypatch.setattr(login_module.credential, "load_credentials", lambda: None)
+    monkeypatch.setattr(registration_resume.storage, "temp_path", lambda name: str(tmp_path / name))
+    binder = FakeBinder(
+        outcome=RegisterOutcome(
+            False, "原注册结果无法核验，请重新登录确认", code="REGISTRATION_REQUEST_UNVERIFIABLE", status_code=409
+        )
+    )
+    widget = LoginDialog(binder)
+    sign_ref = {}
+    submitting_states = []
+    watchdog_fired = []
+
+    def real_dialog(parent=None, *, load_document=None, **kwargs):
+        sign = AgreementSignDialog(parent, document=AGREEMENT, load_document=load_document, **kwargs)
+        sign_ref["dialog"] = sign
+        # 真实 modal 事件循环内通过真实 submit_requested 信号启动异步注册 task。
+        from PySide6.QtCore import QTimer
+
+        sign.submit_token = "real-modal-token"
+
+        def click_confirm_after_open():
+            sign.begin_submit()
+            submitting_states.append(sign.gate.status)
+            sign.submit_requested.emit(sign.version)
+
+        def watchdog():
+            if sign.isVisible():
+                watchdog_fired.append(True)
+                sign.finish_submit(False, "测试 watchdog：提交信号未完成")
+                sign.reject()
+
+        QTimer.singleShot(0, click_confirm_after_open)
+        QTimer.singleShot(5000, watchdog)
+        return sign
+
+    monkeypatch.setattr(login_module, "AgreementSignDialog", real_dialog)
+    registration_resume.save_pending("req-real-modal", "taken", "terms-2026-10-v1")
+    widget.fill_register_form = lambda username="taken", password="wrong", invite="INVITE": (
+        widget.r_username.setText(username),
+        widget.r_password.setText(password),
+        widget.r_confirm_password.setText(password),
+        widget.r_invite.setText(invite),
+    )
+    widget.fill_register_form()
+
+    try:
+        widget.do_register()
+        sign = sign_ref["dialog"]
+        assert submitting_states == ["submitting"]
+        assert watchdog_fired == []
+        assert sign.result() == QDialog.DialogCode.Rejected
+        assert sign.gate.status != "submitting"
+        assert widget._sign_dialog is None
+        assert registration_resume.load_pending()["registration_request_id"] == "req-real-modal"
+        assert widget.tabs.currentIndex() == 0
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_registration_request_conflict_preserves_pending_and_form(dialog):
+    """N22: 同 ID 内容冲突时不清恢复记录，提示保留输入且不盲目重试。"""
+    request_id = "req-conflict"
+    registration_resume.save_pending(request_id, "taken", "terms-2026-10-v1")
+    FakeSignDialog.next_result = QDialog.DialogCode.Rejected
+    dialog.widget.fill_register_form(username="taken", invite="changed-invite")
+    dialog.widget.tabs.setCurrentIndex(1)
+    dialog.widget.do_register()
+
+    sign = FakeSignDialog.last_instance
+    dialog.widget._sign_dialog = sign
+    dialog.widget._active_register_token = sign.submit_token
+    dialog.widget._on_register_finished(
+        sign.submit_token,
+        RegisterOutcome(
+            False,
+            "该注册请求与先前提交的内容不一致，请勿盲目重试",
+            code="REGISTRATION_REQUEST_CONFLICT",
+            status_code=409,
+        ),
+    )
+
+    assert registration_resume.load_pending()["registration_request_id"] == request_id
+    assert registration_resume.request_id_for("taken") == request_id
+    assert dialog.widget.tabs.currentIndex() == 1
+    assert dialog.widget.r_username.text() == "taken"
+    assert dialog.widget.r_invite.text() == "changed-invite"
     assert dialog.messages.errors
-    message = str(dialog.messages.errors[-1])
-    assert "原密码" in message
+    assert "不一致" in dialog.messages.errors[-1][1]

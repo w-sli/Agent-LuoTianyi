@@ -89,12 +89,20 @@ class LoginDialog(QDialog):
             if saved_url:
                 self.custom_base_url = saved_url
 
+    def _clear_confirmed_pending_registration(self, username: str) -> None:
+        """成功登录已确认同名账号存在，可清理该账号的未决注册恢复记录。"""
+        pending = registration_resume.load_pending()
+        if pending and pending.get("username") == username:
+            registration_resume.clear_pending()
+        self._resuming_registration = False
+
     def try_auto_login(self) -> bool:
         try:
             if self.l_auto_login.isChecked() and self.saved_token and self.l_username.text():
                 self.logger.info("Attempting auto login...")
                 ret = self.binder.on_auto_login(self.l_username.text(), self.saved_token)
                 if ret:
+                    self._clear_confirmed_pending_registration(self.l_username.text())
                     self.logger.info("Auto login successful")
                     return True
                 else:
@@ -216,6 +224,7 @@ class LoginDialog(QDialog):
 
         success, msg = self.binder.on_login(username, password, do_auto_login=do_auto_login)
         if success:
+            self._clear_confirmed_pending_registration(username)
             self.accept()
         else:
             QMessageBox.critical(self, "登录失败", msg)
@@ -255,7 +264,7 @@ class LoginDialog(QDialog):
                 self,
                 "继续上次注册",
                 "检测到上次未完成的注册，将使用原账号信息确认结果。\n"
-                "请使用注册时设置的原用户名和原密码；成功后登录的也是该账号。",
+                "请使用注册时设置的原用户名和原密码；若服务端无法核验，请改用原账号登录确认。",
             )
         self._submit_context = {
             "username": username,
@@ -360,19 +369,36 @@ class LoginDialog(QDialog):
             dialog.finish_submit(False, "用户协议已更新，请重新阅读")
             dialog.reload_document()
             return
-        if outcome.status_code and 400 <= outcome.status_code < 500 and outcome.status_code != 429:
-            # 服务端已明确拒绝（业务 4xx）：本次确定没有成功，结束未决状态，
-            # 允许用户修正用户名/邀请码后直接开始新请求；只有结果未知（超时/断线）才保留记录。
+        if outcome.code == "REGISTRATION_REQUEST_UNVERIFIABLE":
+            # 服务端确认该 request ID 已有成功记录，但当前凭据无法核验。
+            # spec:297：提示重新登录确认；保留 pending，登录成功后再清理。
+            context = self._submit_context or {}
+            self.l_username.setText(str(context.get("username", "")))
+            dialog.finish_submit(False, outcome.message)
+            dialog.reject()
+            self.tabs.setCurrentIndex(0)
+            QMessageBox.information(
+                self,
+                "请登录确认",
+                "无法核验此前注册请求。请使用原账号登录确认；未决请求已保留，不会创建替代账号。",
+            )
+            return
+        if outcome.code == "REGISTRATION_REQUEST_CONFLICT":
+            # 同一 ID 的内容不一致：不要盲目重试或清掉唯一恢复入口，保留表单输入。
+            dialog.finish_submit(False, outcome.message)
+            dialog.reject()
+            QMessageBox.critical(self, "注册请求不一致", outcome.message)
+            return
+        if outcome.status_code in (400, 403, 422) and outcome.code != "PASSWORD_DECRYPT_FAILED":
+            # 仅清理可证明本次请求未成功的输入/业务失败；解密失败可能遮蔽更早请求结果，需保留恢复 ID。
             registration_resume.clear_pending()
+            self._resuming_registration = False
             dialog.finish_submit(False, outcome.message)
             # N10: 明确业务失败时关闭协议窗口并弹窗提示失败，避免按钮仍显示“不同意，返回注册”
             dialog.reject()
-            message = outcome.message
-            if outcome.code == "REGISTRATION_REQUEST_UNVERIFIABLE":
-                # N12：无法核验原操作时，明确告诉用户要用原注册密码确认。
-                message = f"{message}\n如需确认原注册，请使用注册时设置的原密码重试。"
-            QMessageBox.critical(self, "注册失败", message)
+            QMessageBox.critical(self, "注册失败", outcome.message)
             return
+        # 429、5xx、网络失败及未识别的响应：保留窗口阅读状态与 pending，允许有限重试。
         dialog.finish_submit(False, outcome.message)
 
     def open_reset_account_dialog(self):
