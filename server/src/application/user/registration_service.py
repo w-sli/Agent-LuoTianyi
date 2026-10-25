@@ -49,7 +49,7 @@ class InvalidAgreementInputError(RegistrationError):
 
     code = "INVALID_AGREEMENT_INPUT"
     status_code = 422
-    detail = "协议提交字段不合法"
+    detail = "注册信息不完整或格式有误，请检查后重试"
 
 
 class AgreementChangedError(RegistrationError):
@@ -69,7 +69,7 @@ class RegistrationRequestConflictError(RegistrationError):
 
     code = "REGISTRATION_REQUEST_CONFLICT"
     status_code = 409
-    detail = "该注册请求与先前提交的内容不一致，请勿盲目重试"
+    detail = "注册信息与之前提交的内容不一致，请核对后继续"
 
 
 class RegistrationRequestUnverifiableError(RegistrationError):
@@ -77,7 +77,7 @@ class RegistrationRequestUnverifiableError(RegistrationError):
 
     code = "REGISTRATION_REQUEST_UNVERIFIABLE"
     status_code = 409
-    detail = "原注册结果无法核验，请用账号密码登录确认；不会创建替代账号"
+    detail = "上次注册已经完成，请用该账号登录确认"
 
 
 class RegistrationService:

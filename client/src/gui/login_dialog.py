@@ -263,7 +263,7 @@ class LoginDialog(QDialog):
             QMessageBox.information(
                 self,
                 "继续上次注册",
-                "上次注册还没有完成，将为你继续确认。\n"
+                "上次注册还没有完成，需要再提交一次。\n"
                 "请使用上次注册时的用户名和密码；如果提示无法确认，请用原账号登录。",
             )
         self._submit_context = {
@@ -300,7 +300,7 @@ class LoginDialog(QDialog):
         """协议正文加载器；与只读窗口共用 (ok, detail, payload) 契约。"""
         fetch = getattr(self.binder, "on_fetch_agreement", None)
         if fetch is None:
-            return False, "当前客户端未接线协议接口", None
+            return False, "协议加载功能暂时不可用", None
         return fetch()
 
     def _start_registration_submit(self, agreement_version: str) -> None:
@@ -353,7 +353,7 @@ class LoginDialog(QDialog):
         )
         if outcome is None:
             self.logger.error("Register with agreement callback is not wired")
-            return RegisterOutcome(False, "当前客户端未接线协议注册")
+            return RegisterOutcome(False, "注册功能暂时不可用，请稍后重试")
         return outcome
 
     def _on_register_finished(self, token: str, outcome: RegisterOutcome) -> None:
@@ -380,8 +380,9 @@ class LoginDialog(QDialog):
             QMessageBox.information(
                 self,
                 "请先登录确认",
-                "暂时无法确认上次注册的结果。\n"
-                "请用原账号登录：能登录说明注册已经完成；登录不了，可以重置账号后再试。",
+                "上次注册已经完成，但无法用这次输入的密码确认。\n"
+                "请用该账号当前的密码登录；如果登录不成功，请核对用户名和密码，"
+                "或使用登录页的“重置账号”。",
             )
             return
         if outcome.code == "REGISTRATION_REQUEST_CONFLICT":
@@ -391,7 +392,7 @@ class LoginDialog(QDialog):
             QMessageBox.critical(
                 self,
                 "信息不一致",
-                "这次填写的信息和上次提交的不一致。\n请检查用户名和邀请码后重新提交。",
+                "这次填写的信息与上次提交的不一致。\n请核对注册信息后再继续。",
             )
             return
         if outcome.status_code in (400, 403, 422) and outcome.code != "PASSWORD_DECRYPT_FAILED":

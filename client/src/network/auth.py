@@ -5,7 +5,10 @@ import requests
 
 from ..safety import encrypt_pwd
 from ..utils.http_client import HttpClientFactory
+from ..utils.logger import get_logger
 from .agreement import validate_agreement_payload
+
+logger = get_logger("auth")
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,7 @@ class AuthApi:
             verify_ssl=self.verify_ssl,
         )
         if not encrypted_password:
-            return False, "Failed to encrypt password. Check server connection.", {}
+            return False, "密码加密失败，请检查网络连接后重试", {}
 
         resp = self.session.post(
             f"{self.base_url}/auth/login",
@@ -110,7 +113,7 @@ class AuthApi:
             timeout=15,
         )
         if resp.status_code != 200:
-            return False, _error_detail(resp, "Login Failed"), {}
+            return False, _error_detail(resp, "登录失败，请检查用户名和密码"), {}
 
         data = resp.json()
         return True, "Login Successful", data
@@ -166,7 +169,7 @@ class AuthApi:
         for attempt in range(2):
             encrypted_password = self._encrypt_password(password)
             if not encrypted_password:
-                return RegisterOutcome(False, "Failed to encrypt password. Check server connection.")
+                return RegisterOutcome(False, "密码加密失败，请检查网络连接后重试")
 
             payload: dict = {
                 "username": username,
@@ -188,7 +191,8 @@ class AuthApi:
                     timeout=15,
                 )
             except Exception as error:  # noqa: BLE001 - 传输失败：本次结果未知
-                return RegisterOutcome(False, f"网络异常：{error}", code="NETWORK_ERROR")
+                logger.error(f"Register request failed: {error}")
+                return RegisterOutcome(False, "网络异常，请检查网络连接后重试", code="NETWORK_ERROR")
             if resp.status_code == 200:
                 return RegisterOutcome(True, "Registration Successful")
 
@@ -199,13 +203,13 @@ class AuthApi:
 
             return RegisterOutcome(
                 False,
-                _error_detail(resp, "Registration Failed"),
+                _error_detail(resp, "注册失败，请稍后重试"),
                 code=code,
                 agreement_version=_agreement_version(resp),
                 status_code=resp.status_code,
             )
 
-        return RegisterOutcome(False, "Registration Failed")
+        return RegisterOutcome(False, "注册失败，请稍后重试")
 
     def reset_account(self, invite_code: str, new_username: str, new_password: str) -> Tuple[bool, str]:
         """通过邀请码重置账号的用户名和密码。"""
@@ -215,7 +219,7 @@ class AuthApi:
             verify_ssl=self.verify_ssl,
         )
         if not encrypted_password:
-            return False, "Failed to encrypt password. Check server connection."
+            return False, "密码加密失败，请检查网络连接后重试"
 
         resp = self.session.post(
             f"{self.base_url}/auth/reset_account",
@@ -229,7 +233,7 @@ class AuthApi:
         )
         if resp.status_code == 200:
             return True, "Reset Successful"
-        return False, _error_detail(resp, "Reset Failed")
+        return False, _error_detail(resp, "重置失败，请稍后重试")
 
     def fetch_current_agreement(self) -> Tuple[bool, str, dict]:
         """获取当前的用户协议。"""
@@ -239,11 +243,11 @@ class AuthApi:
             timeout=15,
         )
         if resp.status_code != 200:
-            return False, _error_detail(resp, "Failed to load agreement"), {}
+            return False, _error_detail(resp, "用户协议加载失败，请重试"), {}
         try:
             payload = validate_agreement_payload(resp.json())
         except Exception:
             payload = None
         if payload is None:
-            return False, "Failed to load agreement", {}
+            return False, "用户协议加载失败，请重试", {}
         return True, "", payload

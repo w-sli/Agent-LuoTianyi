@@ -81,7 +81,7 @@ def test_agreement_changed_reports_current_version(api):
 
 def test_request_conflict_code(api):
     api._next_response = FakeResponse(
-        409, {"detail": "该注册请求与先前提交的内容不一致，请勿盲目重试", "code": "REGISTRATION_REQUEST_CONFLICT"}
+        409, {"detail": "注册信息与之前提交的内容不一致，请核对后继续", "code": "REGISTRATION_REQUEST_CONFLICT"}
     )
 
     outcome = api.register_with_agreement(
@@ -131,7 +131,7 @@ def test_encryption_failure_returns_outcome(monkeypatch):
 
     outcome = instance.register_with_agreement("newbie", "pw", "INVITE")
 
-    assert outcome == RegisterOutcome(False, "Failed to encrypt password. Check server connection.")
+    assert outcome == RegisterOutcome(False, "密码加密失败，请检查网络连接后重试")
 
 
 def test_register_refreshes_public_key_when_encryption_fails(api, monkeypatch):

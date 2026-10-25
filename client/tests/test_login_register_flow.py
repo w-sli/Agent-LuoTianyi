@@ -243,13 +243,13 @@ def test_conflict_shows_error_without_reload(dialog):
         sign.submit_token,
         RegisterOutcome(
             False,
-            "该注册请求与先前提交的内容不一致，请勿盲目重试",
+            "注册信息与之前提交的内容不一致，请核对后继续",
             code="REGISTRATION_REQUEST_CONFLICT",
             status_code=409,
         ),
     )
 
-    assert sign.submissions == [(False, "该注册请求与先前提交的内容不一致，请勿盲目重试")]
+    assert sign.submissions == [(False, "注册信息与之前提交的内容不一致，请核对后继续")]
     assert sign.reloads == 0
     assert dialog.messages.errors
     assert "不一致" in dialog.messages.errors[-1][1]
@@ -273,7 +273,7 @@ def test_agreement_loader_uses_binder_and_reports_missing_wiring(dialog):
     unwired = LoginDialog(SimpleNamespace())
     try:
         ok, detail, payload = unwired._load_agreement()
-        assert ok is False and payload is None and "未接线" in detail
+        assert ok is False and payload is None and "暂时不可用" in detail
     finally:
         unwired.close()
         unwired.deleteLater()
@@ -525,7 +525,7 @@ def test_unverifiable_recovery_preserves_pending_until_login_confirms(dialog):
         sign.submit_token,
         RegisterOutcome(
             False,
-            "原注册结果无法核验，请重新登录确认；不会创建替代账号",
+            "上次注册已经完成，请用该账号登录确认",
             code="REGISTRATION_REQUEST_UNVERIFIABLE",
             status_code=409,
         ),
@@ -538,8 +538,8 @@ def test_unverifiable_recovery_preserves_pending_until_login_confirms(dialog):
     assert dialog.widget.l_username.text() == "taken"
     assert dialog.messages.infos
     message = dialog.messages.infos[-1][1]
-    assert "请用原账号登录" in message
-    assert "暂时无法确认" in message
+    assert "上次注册已经完成" in message
+    assert "请用该账号当前的密码登录" in message
     # 提示面向用户，不应泄露实现术语。
     for jargon in ("未决请求", "替代账号", "request ID", "pending"):
         assert jargon not in message
@@ -572,7 +572,7 @@ def test_unverifiable_closes_real_modal_and_preserves_pending(app, monkeypatch, 
     monkeypatch.setattr(registration_resume.storage, "temp_path", lambda name: str(tmp_path / name))
     binder = FakeBinder(
         outcome=RegisterOutcome(
-            False, "原注册结果无法核验，请重新登录确认", code="REGISTRATION_REQUEST_UNVERIFIABLE", status_code=409
+            False, "上次注册已经完成，请用该账号登录确认", code="REGISTRATION_REQUEST_UNVERIFIABLE", status_code=409
         )
     )
     widget = LoginDialog(binder)
@@ -653,7 +653,7 @@ def test_registration_request_conflict_preserves_pending_and_form(dialog):
         sign.submit_token,
         RegisterOutcome(
             False,
-            "该注册请求与先前提交的内容不一致，请勿盲目重试",
+            "注册信息与之前提交的内容不一致，请核对后继续",
             code="REGISTRATION_REQUEST_CONFLICT",
             status_code=409,
         ),
