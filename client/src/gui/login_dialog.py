@@ -263,8 +263,8 @@ class LoginDialog(QDialog):
             QMessageBox.information(
                 self,
                 "继续上次注册",
-                "检测到上次未完成的注册，将使用原账号信息确认结果。\n"
-                "请使用注册时设置的原用户名和原密码；若服务端无法核验，请改用原账号登录确认。",
+                "上次注册还没有完成，将为你继续确认。\n"
+                "请使用上次注册时的用户名和密码；如果提示无法确认，请用原账号登录。",
             )
         self._submit_context = {
             "username": username,
@@ -379,15 +379,20 @@ class LoginDialog(QDialog):
             self.tabs.setCurrentIndex(0)
             QMessageBox.information(
                 self,
-                "请登录确认",
-                "无法核验此前注册请求。请使用原账号登录确认；未决请求已保留，不会创建替代账号。",
+                "请先登录确认",
+                "暂时无法确认上次注册的结果。\n"
+                "请用原账号登录：能登录说明注册已经完成；登录不了，可以重置账号后再试。",
             )
             return
         if outcome.code == "REGISTRATION_REQUEST_CONFLICT":
             # 同一 ID 的内容不一致：不要盲目重试或清掉唯一恢复入口，保留表单输入。
             dialog.finish_submit(False, outcome.message)
             dialog.reject()
-            QMessageBox.critical(self, "注册请求不一致", outcome.message)
+            QMessageBox.critical(
+                self,
+                "信息不一致",
+                "这次填写的信息和上次提交的不一致。\n请检查用户名和邀请码后重新提交。",
+            )
             return
         if outcome.status_code in (400, 403, 422) and outcome.code != "PASSWORD_DECRYPT_FAILED":
             # 仅清理可证明本次请求未成功的输入/业务失败；解密失败可能遮蔽更早请求结果，需保留恢复 ID。

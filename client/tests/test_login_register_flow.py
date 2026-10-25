@@ -438,8 +438,8 @@ def test_resume_flow_explains_original_credentials_and_account(dialog):
 
     dialog.widget.do_register()
 
-    assert any("上次未完成的注册" in str(item) for item in dialog.messages.infos)
-    assert any("原用户名和原密码" in str(item) for item in dialog.messages.infos)
+    assert any("上次注册还没有完成" in str(item) for item in dialog.messages.infos)
+    assert any("上次注册时的用户名和密码" in str(item) for item in dialog.messages.infos)
     assert any("已确认上次注册成功" in str(item) for item in dialog.messages.infos)
 
 
@@ -537,8 +537,12 @@ def test_unverifiable_recovery_preserves_pending_until_login_confirms(dialog):
     assert dialog.widget.tabs.currentIndex() == 0
     assert dialog.widget.l_username.text() == "taken"
     assert dialog.messages.infos
-    assert "请使用原账号登录确认" in dialog.messages.infos[-1][1]
-    assert "未决请求已保留" in dialog.messages.infos[-1][1]
+    message = dialog.messages.infos[-1][1]
+    assert "请用原账号登录" in message
+    assert "暂时无法确认" in message
+    # 提示面向用户，不应泄露实现术语。
+    for jargon in ("未决请求", "替代账号", "request ID", "pending"):
+        assert jargon not in message
     assert not dialog.messages.errors
 
     # 如用户返回注册流程并补上原凭据，仍沿用原 request ID，而不是创建新请求。
