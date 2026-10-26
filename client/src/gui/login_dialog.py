@@ -57,7 +57,7 @@ class LoginDialog(QDialog):
         self._sign_dialog: AgreementSignDialog | None = None
         self._submit_context: dict | None = None
         self._active_register_token: str | None = None
-        # 本次注册是否在确认上一次未完成的请求（恢复流程，需要原凭据）。
+        # 本次注册是否在确认上一次结果尚未确定的请求（恢复流程，需要原凭据）。
         self._resuming_registration = False
 
         self.setWindowTitle("ChatWithLuoTianyi - 登录/注册")
@@ -89,11 +89,23 @@ class LoginDialog(QDialog):
             if saved_url:
                 self.custom_base_url = saved_url
 
-    def _clear_confirmed_pending_registration(self, username: str) -> None:
-        """成功登录已确认同名账号存在，可清理该账号的未决注册恢复记录。"""
-        pending = registration_resume.load_pending()
-        if pending and pending.get("username") == username:
+    def _clear_pending_registration_best_effort(self) -> None:
+        """清理本地唯一恢复记录；本地 I/O 失败只记日志，调用方流程继续。
+
+        失败时记录会保留，后续成功登录或同用户名重试仍可再次清理。
+        """
+        try:
             registration_resume.clear_pending()
+        except Exception as error:  # noqa: BLE001 - 本地清理失败不能中断注册/登录结果
+            self.logger.warning(f"Failed to clear pending registration record: {type(error).__name__}: {error}")
+
+    def _settle_pending_registration(self) -> None:
+        """成功登录后结束本机唯一的注册恢复状态。
+
+        桌面端只有一份本地恢复记录与一组登录凭据；认证成功后不再按用户名收窄。
+        清理是 best-effort：本地清理失败不得反转已经成功的登录。
+        """
+        self._clear_pending_registration_best_effort()
         self._resuming_registration = False
 
     def try_auto_login(self) -> bool:
@@ -102,7 +114,7 @@ class LoginDialog(QDialog):
                 self.logger.info("Attempting auto login...")
                 ret = self.binder.on_auto_login(self.l_username.text(), self.saved_token)
                 if ret:
-                    self._clear_confirmed_pending_registration(self.l_username.text())
+                    self._settle_pending_registration()
                     self.logger.info("Auto login successful")
                     return True
                 else:
@@ -224,7 +236,7 @@ class LoginDialog(QDialog):
 
         success, msg = self.binder.on_login(username, password, do_auto_login=do_auto_login)
         if success:
-            self._clear_confirmed_pending_registration(username)
+            self._settle_pending_registration()
             self.accept()
         else:
             QMessageBox.critical(self, "登录失败", msg)
@@ -263,7 +275,7 @@ class LoginDialog(QDialog):
             QMessageBox.information(
                 self,
                 "继续上次注册",
-                "上次注册还没有完成，需要再提交一次。\n"
+                "上次注册结果尚未确认，需要再次提交确认。\n"
                 "请使用上次注册时的用户名和密码；如果提示无法确认，请用原账号登录。",
             )
         self._submit_context = {
@@ -287,7 +299,7 @@ class LoginDialog(QDialog):
         if not accepted:
             # 不同意只回注册表单：输入保留，不创建账号、不消耗邀请码、不退出客户端。
             return
-        registration_resume.clear_pending()
+        self._clear_pending_registration_best_effort()
         if self._resuming_registration:
             # N12：恢复成功对应的是原账号，不是这次输入的新内容。
             QMessageBox.information(self, "成功", "已确认上次注册成功，请使用原账号登录")
@@ -335,7 +347,7 @@ class LoginDialog(QDialog):
         context["request_id"] = registration_resume.new_request_id()
         # 换版后开始的是新请求，不再是"确认上次提交"。
         self._resuming_registration = False
-        registration_resume.clear_pending()
+        self._clear_pending_registration_best_effort()
 
     def _register_with_agreement(self, context: dict, agreement_version: str) -> RegisterOutcome:
         submit = getattr(self.binder, "on_register_with_agreement", None)
@@ -397,7 +409,7 @@ class LoginDialog(QDialog):
             return
         if outcome.status_code in (400, 403, 422) and outcome.code != "PASSWORD_DECRYPT_FAILED":
             # 仅清理可证明本次请求未成功的输入/业务失败；解密失败可能遮蔽更早请求结果，需保留恢复 ID。
-            registration_resume.clear_pending()
+            self._clear_pending_registration_best_effort()
             self._resuming_registration = False
             dialog.finish_submit(False, outcome.message)
             # N10: 明确业务失败时关闭协议窗口并弹窗提示失败，避免按钮仍显示“不同意，返回注册”

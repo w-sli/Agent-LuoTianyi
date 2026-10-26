@@ -54,11 +54,19 @@ class FakeSignDialog(QDialog):
 
 
 class FakeBinder:
-    def __init__(self, outcome=None, agreement=(True, "", AGREEMENT), login_result=(False, "登录失败")):
+    def __init__(
+        self,
+        outcome=None,
+        agreement=(True, "", AGREEMENT),
+        login_result=(False, "登录失败"),
+        auto_login_result=False,
+    ):
         self.outcome = outcome
         self.agreement = agreement
         self.login_result = login_result
+        self.auto_login_result = auto_login_result
         self.login_calls: list[tuple] = []
+        self.auto_login_calls: list[tuple] = []
         self.calls: list[dict] = []
 
     def on_fetch_agreement(self):
@@ -71,6 +79,10 @@ class FakeBinder:
     def on_login(self, username, password, do_auto_login=False):
         self.login_calls.append((username, password, do_auto_login))
         return self.login_result
+
+    def on_auto_login(self, username, token):
+        self.auto_login_calls.append((username, token))
+        return self.auto_login_result
 
 
 @pytest.fixture(scope="module")
@@ -431,16 +443,116 @@ def test_rate_limit_keeps_pending_record_for_retry(dialog):
     assert registration_resume.request_id_for("taken") == request_id
 
 
-def test_resume_flow_explains_original_credentials_and_account(dialog):
-    """N12：恢复上一次未完成注册时说明要用原账号信息，成功后指明是原账号。"""
+def test_resume_flow_explains_unconfirmed_result_and_original_account(dialog):
+    """N29：pending 只表示结果未确认，不能声称注册本身未完成。"""
     registration_resume.save_pending("req-old", "newbie", "terms-2026-10-v1")
     dialog.widget.fill_register_form()
 
     dialog.widget.do_register()
 
-    assert any("上次注册还没有完成" in str(item) for item in dialog.messages.infos)
-    assert any("上次注册时的用户名和密码" in str(item) for item in dialog.messages.infos)
-    assert any("已确认上次注册成功" in str(item) for item in dialog.messages.infos)
+    infos = " ".join(str(item) for item in dialog.messages.infos)
+    assert any(word in infos for word in ("未确认", "尚未确认", "未确定"))
+    assert any(word in infos for word in ("再次提交", "重新提交", "重试"))
+    for wrong in ("还没有完成", "尚未完成", "注册未完成", "注册未成功"):
+        assert wrong not in infos
+    assert "上次注册时的用户名和密码" in infos
+    assert "已确认上次注册成功" in infos
+
+
+@pytest.mark.parametrize("login_username", ["old-name", "new-name"])
+def test_login_success_clears_pending_record_of_any_username(dialog, login_username):
+    """N28：本机只有一个恢复记录，成功登录即结束恢复状态，不再要求用户名相同。"""
+    registration_resume.save_pending("req-old", "old-name", "terms-2026-10-v1")
+    dialog.widget.l_username.setText(login_username)
+    dialog.widget.l_password.setText("pw")
+    dialog.binder.login_result = (True, "登录成功")
+
+    dialog.widget.do_login()
+
+    assert registration_resume.load_pending() is None
+
+
+@pytest.mark.parametrize("login_username", ["old-name", "new-name"])
+def test_login_success_survives_pending_cleanup_failure(dialog, monkeypatch, login_username):
+    """N28：任意用户名登录成功后清理失败也只记日志，不反转登录结果。"""
+    registration_resume.save_pending("req-old", "old-name", "terms-2026-10-v1")
+    warnings: list[str] = []
+
+    def failing_clear():
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(registration_resume, "clear_pending", failing_clear)
+    monkeypatch.setattr(dialog.widget.logger, "warning", lambda message: warnings.append(str(message)))
+    dialog.widget.l_username.setText(login_username)
+    dialog.widget.l_password.setText("pw")
+    dialog.binder.login_result = (True, "登录成功")
+
+    dialog.widget.do_login()
+
+    assert dialog.widget.result() == QDialog.DialogCode.Accepted
+    assert len(dialog.binder.login_calls) == 1
+    assert dialog.messages.errors == []
+    assert dialog.messages.warnings == []
+    assert warnings and "Failed to clear pending registration record" in warnings[0]
+    assert registration_resume.load_pending()["registration_request_id"] == "req-old"
+
+
+@pytest.mark.parametrize("login_username", ["old-name", "new-name"])
+def test_auto_login_success_clears_pending_of_any_username(dialog, login_username):
+    """N28：自动登录成功同样结束本机恢复状态。"""
+    registration_resume.save_pending("req-old", "old-name", "terms-2026-10-v1")
+    dialog.widget.l_auto_login.setChecked(True)
+    dialog.widget.saved_token = "token"
+    dialog.widget.l_username.setText(login_username)
+    dialog.binder.auto_login_result = True
+
+    assert dialog.widget.try_auto_login() is True
+    assert registration_resume.load_pending() is None
+
+
+@pytest.mark.parametrize("login_username", ["old-name", "new-name"])
+def test_auto_login_success_survives_pending_cleanup_failure(dialog, monkeypatch, login_username):
+    """N28：自动登录清理失败也不能把成功认证改成失败。"""
+    registration_resume.save_pending("req-old", "old-name", "terms-2026-10-v1")
+    warnings: list[str] = []
+
+    def failing_clear():
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(registration_resume, "clear_pending", failing_clear)
+    monkeypatch.setattr(dialog.widget.logger, "warning", lambda message: warnings.append(str(message)))
+    dialog.widget.l_auto_login.setChecked(True)
+    dialog.widget.saved_token = "token"
+    dialog.widget.l_username.setText(login_username)
+    dialog.binder.auto_login_result = True
+
+    assert dialog.widget.try_auto_login() is True
+    assert len(dialog.binder.auto_login_calls) == 1
+    assert dialog.messages.errors == []
+    assert dialog.messages.warnings == []
+    assert warnings and "Failed to clear pending registration record" in warnings[0]
+    assert registration_resume.load_pending()["registration_request_id"] == "req-old"
+
+
+def test_registration_success_survives_pending_cleanup_failure(dialog, monkeypatch):
+    """同类本地清理失败不能阻断注册成功后的提示与回登录页。"""
+    warnings: list[str] = []
+
+    def failing_clear():
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(registration_resume, "clear_pending", failing_clear)
+    monkeypatch.setattr(dialog.widget.logger, "warning", lambda message: warnings.append(str(message)))
+    dialog.widget.fill_register_form()
+
+    dialog.widget.do_register()
+
+    assert any("注册成功，请登录" in str(item) for item in dialog.messages.infos)
+    assert dialog.widget.l_username.text() == "newbie"
+    assert dialog.widget.tabs.currentIndex() == 0
+    assert dialog.messages.errors == []
+    assert dialog.messages.warnings == []
+    assert warnings and "Failed to clear pending registration record" in warnings[0]
 
 
 def test_password_decryption_failure_keeps_pending_for_key_refresh(dialog):
@@ -554,7 +666,7 @@ def test_unverifiable_recovery_preserves_pending_until_login_confirms(dialog):
     assert dialog.widget._submit_context["request_id"] == request_id
     assert registration_resume.load_pending()["registration_request_id"] == request_id
 
-    # 登录失败不清记录；同名登录成功后才确认并清除该 pending。
+    # 登录失败不清记录；任意用户名成功登录后清除该 pending。
     dialog.widget.l_password.setText("wrong")
     dialog.binder.login_result = (False, "登录失败")
     dialog.widget.do_login()
